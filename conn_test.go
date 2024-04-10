@@ -96,7 +96,7 @@ func TestConnListen_receive(t *testing.T) {
 
 			go func() {
 				for _, b := range tt.args.in {
-					host.Write(b)
+					_, _ = host.Write(b)
 					res := make([]byte, 256)
 					n, _ := host.Read(res)
 					mu.Lock()
@@ -104,7 +104,7 @@ func TestConnListen_receive(t *testing.T) {
 					mu.Unlock()
 				}
 
-				got.ReadFrom(host)
+				_, _ = got.ReadFrom(host)
 			}()
 
 			tx, err := conn.Acknowledge()
@@ -207,13 +207,13 @@ func TestConnListen_send(t *testing.T) {
 				for {
 					sent := make([]byte, 256)
 					n, _ := host.Read(sent)
-					got.Write(sent[:n])
+					_, _ = got.Write(sent[:n])
 
 					if i >= len(tt.args.in) {
 						break
 					}
 
-					host.Write([]byte{tt.args.in[i]})
+					_, _ = host.Write([]byte{tt.args.in[i]})
 					i++
 				}
 			}()
