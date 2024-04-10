@@ -1,4 +1,4 @@
-module github.com/pafirmin/astm
+module github.com/pafirmin/go-astm
 
 go 1.22.1
 
