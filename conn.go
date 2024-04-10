@@ -19,11 +19,11 @@ var (
 )
 
 type Conn struct {
-	// Conn will return to a waiting state if nothing is received from the instrument for this
-	// duration. The timeout is reset with every communication sent or received.
+	// Conn will send <NAK> and return to a waiting state if messages from the analyzer
+	// are not handled before this timeout expires. Defaults to 10 seconds.
 	Timeout time.Duration
 
-	// Optional error log for logging unexpected errors
+	// Optional error log for logging unexpected errors. Defaults to defalt logger.
 	ErrorLog *log.Logger
 
 	conn io.ReadWriteCloser
@@ -41,10 +41,11 @@ type stateContext struct {
 	in *bufio.Reader
 }
 
-// Listen creates a new Mediator that listens on conn.
-func Listen(conn io.ReadWriteCloser) *Conn {
+// Listen returns a *Conn that wraps rwc and starts listening for
+// messages from the connection analyzer.
+func Listen(rwc io.ReadWriteCloser) *Conn {
 	c := &Conn{}
-	c.conn = conn
+	c.conn = rwc
 	c.enqCh = make(chan struct{})
 	c.ackCh = make(chan struct{})
 	c.nakCh = make(chan struct{})
@@ -52,10 +53,7 @@ func Listen(conn io.ReadWriteCloser) *Conn {
 	c.stxCh = make(chan []byte)
 	c.releaseCh = make(chan struct{})
 	c.ErrorLog = log.Default()
-
-	if c.Timeout == 0 {
-		c.Timeout = 15 * time.Second
-	}
+	c.Timeout = defaultTimeout
 
 	next := c.waiting
 
@@ -88,9 +86,9 @@ func (c *Conn) waiting(sc *stateContext) (stateFunc, error) {
 		case ENQ:
 			return c.establishing, nil
 		case ACK:
-			return c.notify(c.ackCh, defaultTimeout, c.waiting), nil
+			return c.notify(c.ackCh, c.Timeout, c.waiting), nil
 		case NAK:
-			return c.notify(c.nakCh, defaultTimeout, c.waiting), nil
+			return c.notify(c.nakCh, c.Timeout, c.waiting), nil
 		default:
 			err := c.writeByte(NAK)
 			return c.waiting, err
@@ -120,7 +118,7 @@ func (c *Conn) establishing(sc *stateContext) (stateFunc, error) {
 	select {
 	case c.enqCh <- struct{}{}:
 		return c.receiving, c.writeByte(ACK)
-	case <-time.After(defaultTimeout):
+	case <-time.After(c.Timeout):
 		err := c.writeByte(NAK)
 		return c.waiting, err
 	}
@@ -133,7 +131,7 @@ func (c *Conn) receiving(sc *stateContext) (stateFunc, error) {
 	}
 	switch b {
 	case EOT:
-		return c.notify(c.eotCh, defaultTimeout, c.waiting), nil
+		return c.notify(c.eotCh, c.Timeout, c.waiting), nil
 	case STX:
 		return c.processing, nil
 	default:
@@ -182,7 +180,7 @@ func (c *Conn) processing(sc *stateContext) (stateFunc, error) {
 	select {
 	case c.stxCh <- out:
 		err = c.writeByte(ACK)
-	case <-time.After(defaultTimeout):
+	case <-time.After(c.Timeout):
 		err = c.writeByte(NAK)
 	}
 
@@ -198,7 +196,7 @@ func (c *Conn) Acknowledge() (*TransactionReader, error) {
 		return nil, errors.New("connection closed")
 	}
 
-	return &TransactionReader{c: c, timeout: defaultTimeout}, nil
+	return &TransactionReader{c: c, timeout: c.Timeout}, nil
 }
 
 // RequestControl attempts to establish control of the connection. If successful,
@@ -213,11 +211,11 @@ func (c *Conn) Acknowledge() (*TransactionReader, error) {
 //
 // It is up to the caller to avoid attempting to establish control during an active
 // transaction.
-func (m *Conn) RequestControl() (*TransactionWriter, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+func (c *Conn) RequestControl() (*TransactionWriter, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
-	return m.requestControl(ctx)
+	return c.requestControl(ctx)
 }
 
 // RequestControlContext attempts to establish control of the connection. If successful,
@@ -231,39 +229,39 @@ func (m *Conn) RequestControl() (*TransactionWriter, error) {
 //
 // It is up to the caller to avoid attempting to establish control during an active
 // transaction.
-func (m *Conn) RequestControlContext(ctx context.Context) (*TransactionWriter, error) {
-	return m.requestControl(ctx)
+func (c *Conn) RequestControlContext(ctx context.Context) (*TransactionWriter, error) {
+	return c.requestControl(ctx)
 }
 
-func (m *Conn) requestControl(ctx context.Context) (*TransactionWriter, error) {
-	err := m.writeByte(ENQ)
+func (c *Conn) requestControl(ctx context.Context) (*TransactionWriter, error) {
+	err := c.writeByte(ENQ)
 	if err != nil {
 		return nil, err
 	}
 
 	select {
-	case <-m.ackCh:
-		return &TransactionWriter{c: m, timeout: defaultTimeout}, nil
-	case <-m.releaseCh:
+	case <-c.ackCh:
+		return &TransactionWriter{c: c, timeout: c.Timeout}, nil
+	case <-c.releaseCh:
 		return nil, ErrLineContention
-	case <-m.nakCh:
+	case <-c.nakCh:
 		return nil, ErrNotAcknowledged
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-// Close waits for any existing transaction to finish then closes m's underlying ReadWriteCloser.
-func (m *Conn) Close() error {
-	return m.conn.Close()
+// Close closes m's underlying ReadWriteCloser.
+func (c *Conn) Close() error {
+	return c.conn.Close()
 }
 
-func (m *Conn) write(b []byte) (int, error) {
-	return m.conn.Write(b)
+func (c *Conn) write(b []byte) (int, error) {
+	return c.conn.Write(b)
 }
 
-func (m *Conn) writeByte(b byte) error {
-	_, err := m.write([]byte{b})
+func (c *Conn) writeByte(b byte) error {
+	_, err := c.write([]byte{b})
 	return err
 }
 
@@ -275,7 +273,9 @@ type TransactionReader struct {
 }
 
 // Read reads the next record from tr into b. Read blocks until a record is available
-// or timeout expires. Read returns io.EOF when <EOT> is received from the instrument.
+// or timeout expires. A successful read will automatically trigger an <ACK> to be sent
+// on the underlying connection. Read returns io.EOF when <EOT> is received from the
+// instrument.
 func (tr *TransactionReader) Read(b []byte) (n int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), tr.timeout)
 	defer cancel()
@@ -306,7 +306,7 @@ func (tr *TransactionReader) read(b []byte, ctx context.Context) (n int, err err
 }
 
 // SetReadTimeout sets the maximum amount of time Read should wait for the next
-// record.
+// record. Defaults to the same timeout as tr's Conn.
 func (tr *TransactionReader) SetReadTimeout(d time.Duration) {
 	tr.timeout = d
 }
@@ -319,53 +319,53 @@ type TransactionWriter struct {
 }
 
 // SetWriteTimeout sets the maximum time TransactionWriter should wait for ACK
-// after writing to the underlying connection
-func (tx *TransactionWriter) SetWriteTimeout(d time.Duration) {
-	tx.timeout = d
+// after writing to the underlying connection. Defaults to the same timeout as tr's Conn.
+func (tr *TransactionWriter) SetWriteTimeout(d time.Duration) {
+	tr.timeout = d
 }
 
 // Write writes b to the underlying ReadWriteCloser and blocks until the frame is
 // either acknowledged with ACK, rejected with NAK, or timeout expires. When all
 // frames have been written, the caller must close the TransactionWriter with a
 // call to End to signal the end of the transfer.
-func (tx *TransactionWriter) Write(b []byte) (int, error) {
-	if tx.closed {
+func (tr *TransactionWriter) Write(b []byte) (int, error) {
+	if tr.closed {
 		return 0, errors.New("transaction closed")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), tx.timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), tr.timeout)
 	defer cancel()
 
-	return tx.write(b, ctx)
+	return tr.write(b, ctx)
 }
 
-func (tx *TransactionWriter) write(b []byte, ctx context.Context) (int, error) {
-	n, err := tx.c.write(b)
+func (tr *TransactionWriter) write(b []byte, ctx context.Context) (int, error) {
+	n, err := tr.c.write(b)
 	if err != nil {
 		return n, err
 	}
 
 	select {
-	case <-tx.c.ackCh:
+	case <-tr.c.ackCh:
 		return n, nil
-	case <-tx.c.nakCh:
+	case <-tr.c.nakCh:
 		return n, ErrNotAcknowledged
-	case <-tx.c.releaseCh:
-		tx.closed = true
+	case <-tr.c.releaseCh:
+		tr.closed = true
 		return n, ErrLineContention
 	case <-ctx.Done():
-		tx.closed = true
+		tr.closed = true
 
 		return n, ctx.Err()
 	}
 }
 
 // Close closes the transaction and writes EOT to the underlying connection
-func (tx *TransactionWriter) Close() error {
-	if tx.closed {
+func (tr *TransactionWriter) Close() error {
+	if tr.closed {
 		return errors.New("close of closed transaction")
 	}
 
-	tx.closed = true
-	return tx.c.writeByte(EOT)
+	tr.closed = true
+	return tr.c.writeByte(EOT)
 }
