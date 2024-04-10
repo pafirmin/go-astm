@@ -60,12 +60,6 @@ func main() {
 
 ## Bi-directional communication
 
-`RequestControl()` tries to avoid line contention. If called while in active transfer, it will block
-until the end of the transfer. If the analyzer responds to an ENQ with ENQ, it will return with
-`astm.ErrLineContention`. That said, how this is used will depend on the behaviour of each
-analyzer and especially on how rapidly it sends succesive Inquiries. It may be necessary to implement
-some sort of queue.
-
 ```go
 // ...
 tx, err := conn.RequestControl()
@@ -88,7 +82,7 @@ for _, f := range myFrames {
     //...
 }
 
-tx.End()
+tx.Close()
 // ...
 ```
 

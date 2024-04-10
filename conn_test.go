@@ -233,102 +233,11 @@ func TestConnListen_send(t *testing.T) {
 					break
 				}
 			}
-			tx.End()
+			tx.Close()
 
 			mu.Lock()
 			defer mu.Unlock()
 			assert.Equal(t, tt.wantSent, got.Bytes())
 		})
 	}
-}
-
-// Case when RequestControl() is called while already in transfer
-func TestConnListen_wait_for_idle(t *testing.T) {
-	in := [][]byte{
-		{ENQ},
-		FormatFrame(0, []byte("H|\\^&|||cobas-e411^1|||||host|RSUPL^BATCH|P|1\r"), false),
-		FormatFrame(1, []byte("O|1|123|193^2^1^^S1^SC|^^^111^1^1|R||20230602192914||||N||||1||||||||||F\r"), false),
-		FormatFrame(2, []byte("R|1|^^^10^^0|0.310|ulU/ml|0.270^4.20|N||F||||20050619101521\r"), false),
-		FormatFrame(3, []byte("L|1|N\r"), false),
-		{EOT},
-		{ACK},
-		{ACK},
-		{ACK},
-		{ACK},
-	}
-
-	out := [][]byte{
-		FormatFrame(0, []byte("H|\\^&|||Host|||||||P\r"), false),
-		FormatFrame(1, []byte("O|1|sample1|3^@95^2^^SAMPLE^NORMAL|^^^141^\\^^^137^|R|20230602192914|||||N||||||||||||||Q\r"), false),
-		FormatFrame(2, []byte("L|1|N\r"), false),
-	}
-
-	wantIn := slices.Concat(
-		[]byte("H|\\^&|||cobas-e411^1|||||host|RSUPL^BATCH|P|1\r"),
-		[]byte("O|1|123|193^2^1^^S1^SC|^^^111^1^1|R||20230602192914||||N||||1||||||||||F\r"),
-		[]byte("R|1|^^^10^^0|0.310|ulU/ml|0.270^4.20|N||F||||20050619101521\r"),
-		[]byte("L|1|N\r"),
-	)
-	wantOut := slices.Concat(
-		[]byte{ACK},
-		[]byte{ACK},
-		[]byte{ACK},
-		[]byte{ACK},
-		[]byte{ACK},
-		[]byte{ENQ},
-		FormatFrame(0, []byte("H|\\^&|||Host|||||||P\r"), false),
-		FormatFrame(1, []byte("O|1|sample1|3^@95^2^^SAMPLE^NORMAL|^^^141^\\^^^137^|R|20230602192914|||||N||||||||||||||Q\r"), false),
-		FormatFrame(2, []byte("L|1|N\r"), false),
-		[]byte{EOT},
-	)
-
-	delay := 50 * time.Millisecond
-	instrument, host := net.Pipe()
-	m := Listen(instrument)
-	got := bytes.Buffer{}
-	sent := bytes.Buffer{}
-	var mu sync.Mutex
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		mu.Lock()
-		defer mu.Unlock()
-		tx, err := m.Acknowledge()
-		assert.NoError(t, err)
-		_, err = got.ReadFrom(tx)
-		assert.NoError(t, err)
-	}()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(delay)
-
-		tx, err := m.RequestControl()
-		assert.NoError(t, err)
-		assert.NotNil(t, tx)
-
-		for _, f := range out {
-			_, err := tx.Write(f)
-			assert.NoError(t, err)
-		}
-		tx.End()
-	}()
-
-	for _, b := range in {
-		host.Write(b)
-		res := make([]byte, 256)
-		n, _ := host.Read(res)
-		sent.Write(res[:n])
-		time.Sleep(delay)
-	}
-
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	assert.Equal(t, wantOut, sent.Bytes())
-	assert.Equal(t, wantIn, got.Bytes())
 }
