@@ -95,9 +95,9 @@ func TestConnListen_receive(t *testing.T) {
 			var mu sync.Mutex
 
 			go func() {
+				res := make([]byte, 256)
 				for _, b := range tt.args.in {
 					_, _ = host.Write(b)
-					res := make([]byte, 256)
 					n, _ := host.Read(res)
 					mu.Lock()
 					sent.Write(res[:n])
@@ -204,8 +204,8 @@ func TestConnListen_send(t *testing.T) {
 				mu.Lock()
 				defer mu.Unlock()
 				i := 0
+				sent := make([]byte, 256)
 				for {
-					sent := make([]byte, 256)
 					n, _ := host.Read(sent)
 					_, _ = got.Write(sent[:n])
 

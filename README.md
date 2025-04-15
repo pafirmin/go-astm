@@ -9,45 +9,45 @@ Because `Listen()` wraps any `io.ReadWriteCloser`, the library works with serial
 Full example (using [go-serial](https://github.com/bugst/go-serial) package):
 ```go
 func main() {
-	baud := 9600
-	parity := 0
-	stopBit := 2
-	dataBit := 8
+    baud := 9600
+    parity := 0
+    stopBit := 2
+    dataBit := 8
 
-	mode := &serial.Mode{
-		BaudRate: baud,
-		StopBits: serial.StopBits(stopBit),
-		Parity:   serial.Parity(parity),
-		DataBits: dataBit,
-	}
+    mode := &serial.Mode{
+        BaudRate: baud,
+        StopBits: serial.StopBits(stopBit),
+        Parity:   serial.Parity(parity),
+        DataBits: dataBit,
+    }
 
-	p, err := serial.Open("/dev/ttyS0", mode)
-	if err != nil {
-		log.Fatal(err)
-	}
+    p, err := serial.Open("/dev/ttyS0", mode)
+    if err != nil {
+        log.Fatal(err)
+    }
 
-	conn := astm.Listen(p)
-	defer conn.Close()
+    conn := astm.Listen(p)
+    defer conn.Close()
 
-	for {
-		tx, err := conn.Acknowledge()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
+    for {
+        tx, err := conn.Acknowledge()
+        if err != nil {
+            fmt.Println(err)
+            return
+        }
 
-		for {
-			buf := make([]byte, 248)
-			n, err := tx.Read(buf)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return
-			}
-			fmt.Println(string(buf[:n]))
-		}
-	}
+        buf := make([]byte, 248)
+        for {
+            n, err := tx.Read(buf)
+            if err == io.EOF {
+                break
+            }
+            if err != nil {
+                return
+            }
+            fmt.Println(string(buf[:n]))
+        }
+    }
 }
 
 // Example output:
