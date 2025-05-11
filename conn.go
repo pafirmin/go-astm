@@ -34,6 +34,7 @@ type Conn struct {
 	enqCh     chan struct{}
 	eotCh     chan struct{}
 	stxCh     chan []byte
+	ctx       context.Context
 }
 
 type stateFunc func(*stateContext) (stateFunc, error)
@@ -44,6 +45,7 @@ type stateContext struct {
 // Listen returns a *Conn that wraps rwc and starts listening for
 // messages from the connection analyzer.
 func Listen(rwc io.ReadWriteCloser) *Conn {
+	ctx, cancel := context.WithCancelCause(context.Background())
 	c := &Conn{}
 	c.conn = rwc
 	c.enqCh = make(chan struct{})
@@ -54,18 +56,20 @@ func Listen(rwc io.ReadWriteCloser) *Conn {
 	c.releaseCh = make(chan struct{})
 	c.ErrorLog = log.Default()
 	c.Timeout = defaultTimeout
+	c.ctx = ctx
 
 	next := c.waiting
 
 	go func() {
-		defer close(c.enqCh)
-		ctx := &stateContext{
+		var err error
+		defer cancel(err)
+
+		state := &stateContext{
 			in: bufio.NewReader(c.conn),
 		}
 
-		var err error
 		for {
-			next, err = next(ctx)
+			next, err = next(state)
 			if err != nil {
 				c.ErrorLog.Println(err)
 				break
@@ -174,8 +178,7 @@ func (c *Conn) processing(sc *stateContext) (stateFunc, error) {
 		return c.receiving, err
 	}
 
-	out := make([]byte, record.Len()-1)
-	copy(out, record.Bytes()[1:])
+	out := record.Bytes()[1:]
 
 	select {
 	case c.stxCh <- out:
@@ -212,7 +215,7 @@ func (c *Conn) Acknowledge() (*TransactionReader, error) {
 // It is up to the caller to avoid attempting to establish control during an active
 // transaction.
 func (c *Conn) RequestControl() (*TransactionWriter, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+	ctx, cancel := context.WithTimeout(c.ctx, c.Timeout)
 	defer cancel()
 
 	return c.requestControl(ctx)
@@ -277,17 +280,17 @@ type TransactionReader struct {
 // on the underlying connection. Read returns io.EOF when <EOT> is received from the
 // instrument.
 func (tr *TransactionReader) Read(b []byte) (n int, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), tr.timeout)
+	if tr.closed {
+		return 0, io.EOF
+	}
+
+	ctx, cancel := context.WithTimeout(tr.c.ctx, tr.timeout)
 	defer cancel()
 
 	return tr.read(b, ctx)
 }
 
 func (tr *TransactionReader) read(b []byte, ctx context.Context) (n int, err error) {
-	if tr.closed {
-		return 0, io.EOF
-	}
-
 	defer func() {
 		if err != nil {
 			tr.closed = true
@@ -333,7 +336,7 @@ func (tr *TransactionWriter) Write(b []byte) (int, error) {
 		return 0, errors.New("transaction closed")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), tr.timeout)
+	ctx, cancel := context.WithTimeout(tr.c.ctx, tr.timeout)
 	defer cancel()
 
 	return tr.write(b, ctx)
